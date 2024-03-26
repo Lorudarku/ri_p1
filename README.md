@@ -1,2 +1,1 @@
-# ri_p1
-Primer
+Primera práctica de RI.
