@@ -28,6 +28,7 @@ import java.util.concurrent.Executors;
 public class WebIndexer {
 
     private static String docsPath;
+    private static String urlPath;
     private static boolean titleTermVectors;
     private static boolean bodyTermVectors;
     private static Analyzer analyzer;
@@ -36,8 +37,9 @@ public class WebIndexer {
 
     public static void main(String[] args) throws IOException, InterruptedException {
 
-        String indexPath = "index";    // Carpeta donde se almacenará el índice
-        docsPath = "docs";             // Carpeta donde se almacenan los archivos .loc y .loc.notags
+        String indexPath = "src/main/resources/index";    // Carpeta donde se almacenará el índice
+        docsPath = "src/main/resources/docs";             // Carpeta donde se almacenan los archivos .loc y .loc.notags
+        urlPath = "src/test/resources/urls";              // Carpeta donde se almacenan los archivos .url
         boolean create = false;        // Flag para la opción create
         int numThreads = Runtime.getRuntime().availableProcessors();    // Número de hilos por defecto
         printThreadInfo = false;       // Flag para la opción threadInfo
@@ -105,7 +107,7 @@ public class WebIndexer {
         ExecutorService executorService = Executors.newFixedThreadPool(numThreads);
 
         // Procesar archivos .url en paralelo
-        Files.walk(Path.of(docsPath))
+        Files.walk(Path.of(urlPath))
                 .filter(Files::isRegularFile)
                 .filter(path -> path.toString().endsWith(".url"))
                 .forEach(path -> executorService.submit(() -> processUrlFile(path, indexWriter)));
