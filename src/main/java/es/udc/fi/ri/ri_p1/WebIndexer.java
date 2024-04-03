@@ -224,7 +224,7 @@ public class WebIndexer {
 
                 // Crear documento Lucene para el archivo .loc.notags
                 Document luceneDoc = new Document();
-                luceneDoc.add(new StringField("url", url, Field.Store.YES));
+                luceneDoc.add(new StringField("path", urlFilePath.toString(), Field.Store.YES));
                 luceneDoc.add(new Field("title", title, titleFieldType));
                 luceneDoc.add(new Field("body", body, bodyFieldType));
                 luceneDoc.add(new StoredField("title", title)); // Campo adicional para ver en la pestaña de documentos de Luke
