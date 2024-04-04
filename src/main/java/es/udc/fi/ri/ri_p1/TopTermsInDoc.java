@@ -1,7 +1,11 @@
 package es.udc.fi.ri.ri_p1;
+import org.apache.lucene.document.Document;
 import org.apache.lucene.index.*;
 import org.apache.lucene.store.*;
+import org.apache.lucene.util.BytesRef;
+
 import java.io.*;
+import java.lang.reflect.Field;
 import java.nio.file.*;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -45,44 +49,50 @@ public class TopTermsInDoc {
 
         // Abrir el índice
         Directory dir = FSDirectory.open(Paths.get(indexPath));
+        IndexReader reader = DirectoryReader.open(dir);
 
-        try (IndexReader reader = DirectoryReader.open(dir)) {
-            // Obtener el término vector del documento especificado
-            Terms terms = reader.getTermVector(docID, field);
 
-            if (terms == null) {
-                System.err.println("No se encontró el documento con el ID especificado.");
-                System.exit(1);
-            }
+        // Calcular tf-idf y ordenar términos
+        List<TermWithStats> termList = calculateTermStats(reader, field, docID);
+        termList.sort(Comparator.comparingDouble(TermWithStats::getTfIdf).reversed());
 
-            // Calcular tf-idf y ordenar términos
-            List<TermWithStats> termList = calculateTermStats(terms, reader, field, docID);
-            termList.sort(Comparator.comparingDouble(TermWithStats::getTfIdf).reversed());
+        // Presentar los términos top n
+        presentTopTerms(termList, topN, outFile);
 
-            // Presentar los términos top n
-            presentTopTerms(termList, topN, outFile);
-        }
         // Cerrar el lector del índice
+
     }
 
-    private static List<TermWithStats> calculateTermStats(Terms terms, IndexReader reader, String field, int docID) throws IOException {
+    private static List<TermWithStats> calculateTermStats(IndexReader reader, String field, int docID) throws IOException {
         List<TermWithStats> termList = new ArrayList<>();
+        Terms terms = MultiTerms.getTerms(reader, field);
         TermsEnum iterator = terms.iterator();
 
         while (iterator.next() != null) {
             String termText = iterator.term().utf8ToString();
-            long termFreq = iterator.totalTermFreq();
-            long docFreq = reader.docFreq(new Term(field, termText));
-            double idf = Math.log10((double) reader.numDocs() / (docFreq + 1)); // +1 para evitar la división por cero
-            double tfIdf = termFreq * idf;
+            PostingsEnum posting = MultiTerms.getTermPostingsEnum(reader, field, new BytesRef(termText));
 
-            termList.add(new TermWithStats(termText, termFreq, docFreq, tfIdf));
+            while(posting.nextDoc() != PostingsEnum.NO_MORE_DOCS){
+                if (posting.docID()==docID){
+                    long termFreq = iterator.totalTermFreq();
+                    long docFreq = reader.docFreq(new Term(field, termText));
+                    double idf = Math.log10((double) reader.numDocs() / (docFreq + 1)); // +1 para evitar la división por cero
+                    double tfIdf = termFreq * idf;
+
+                    termList.add(new TermWithStats(termText, termFreq, docFreq, tfIdf));
+                }
+            }
         }
-
         return termList;
     }
 
     private static void presentTopTerms(List<TermWithStats> termList, int topN, String outFile) throws IOException {
+        // Verificar si el archivo de salida existe
+        if (!Files.exists(Paths.get(outFile))) {
+            // Si el archivo no existe, crearlo
+            Files.createFile(Paths.get(outFile));
+        }
+
         try (PrintWriter writer = new PrintWriter(new FileWriter(outFile))) {
             for (int i = 0; i < Math.min(topN, termList.size()); i++) {
                 TermWithStats term = termList.get(i);

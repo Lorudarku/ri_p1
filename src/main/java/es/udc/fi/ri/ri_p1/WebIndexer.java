@@ -19,6 +19,7 @@ import java.net.http.HttpResponse;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Duration;
 import java.util.Date;
@@ -142,6 +143,7 @@ public class WebIndexer {
                 processUrl(line, indexWriter, path);
             }
             reader.close();
+            indexWriter.close();
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -174,17 +176,23 @@ public class WebIndexer {
 
             // Verificar si la respuesta es exitosa (código 200)
             if (response.statusCode() == 200) {
+                String fileName = url.replaceAll("^https?://", "").replaceAll("/", "_").replaceAll("\\W+", "");
+                String locfilePath = docsPath + "/" + fileName + ".loc.";
+                String locnotagsfilePath = docsPath + "/" + fileName + ".loc.notags";
+
+
+                Path rutaLoc = Paths.get(locfilePath);
+                Files.write(rutaLoc, response.body().getBytes());
+
                 // Parsear la página web
                 org.jsoup.nodes.Document doc = Jsoup.parse(response.body());
                 String title = doc.title();
                 String body = doc.body().text();
 
                 // Crear el nombre de archivo local
-                String fileName = url.replaceAll("^https?://", "").replaceAll("/", "_").replaceAll("\\W+", "");
-                String filePath = docsPath + "/" + fileName + ".loc.notags";
 
                 // Escribir el contenido en el archivo .loc.notags
-                try (PrintWriter writer = new PrintWriter(filePath)) {
+                try (PrintWriter writer = new PrintWriter(locnotagsfilePath)) {
                     writer.println(title);
                     writer.println(body);
                 }
@@ -193,10 +201,10 @@ public class WebIndexer {
                 BasicFileAttributes attrs = Files.readAttributes(urlFilePath, BasicFileAttributes.class);
 
                 // Calcular el tamaño del archivo .loc
-                long locSize = Files.size(urlFilePath);
+                long locSize = Files.size(rutaLoc);
 
                 // Calcular el tamaño del archivo .loc.notags
-                long notagsSize = Files.size(Path.of(filePath));
+                long notagsSize = Files.size(Path.of(locnotagsfilePath));
 
                 // Obtener información de tiempo
                 Date creationTime = new Date(attrs.creationTime().toMillis());
@@ -226,11 +234,11 @@ public class WebIndexer {
 
                 // Crear documento Lucene para el archivo .loc.notags
                 Document luceneDoc = new Document();
-                luceneDoc.add(new StringField("path", urlFilePath.toString(), Field.Store.YES));
+                luceneDoc.add(new StringField("path", locnotagsfilePath, Field.Store.YES));
                 luceneDoc.add(new Field("title", title, titleFieldType));
                 luceneDoc.add(new Field("body", body, bodyFieldType));
-                luceneDoc.add(new StoredField("title", title)); // Campo adicional para ver en la pestaña de documentos de Luke
-                luceneDoc.add(new StoredField("body", body)); // Campo adicional para ver en la pestaña de documentos de Luke
+                //luceneDoc.add(new StoredField("title", title)); // Campo adicional para ver en la pestaña de documentos de Luke
+                //luceneDoc.add(new StoredField("body", body)); // Campo adicional para ver en la pestaña de documentos de Luke
                 luceneDoc.add(new StringField("hostname", InetAddress.getLocalHost().getHostName(), Field.Store.YES));
                 luceneDoc.add(new StringField("thread", Thread.currentThread().getName(), Field.Store.YES));
                 luceneDoc.add(new LongPoint("locKb", locSize / 1024));
@@ -244,8 +252,17 @@ public class WebIndexer {
                 luceneDoc.add(new StoredField("lastAccessTimeLucene", lastAccessTimeLucene));
                 luceneDoc.add(new StoredField("lastModifiedTimeLucene", lastModifiedTimeLucene));
 
-                // Indexar el documento
-                indexWriter.addDocument(luceneDoc);
+                if (indexWriter.getConfig().getOpenMode() == IndexWriterConfig.OpenMode.CREATE) {
+                    // New index, so we just add the document (no old document can be there):
+                    System.out.println("adding " + urlFilePath);
+                    indexWriter.addDocument(luceneDoc);
+                } else {
+                    // Existing index (an old copy of this document may have been indexed) so
+                    // we use updateDocument instead to replace the old one matching the exact
+                    // path, if present:
+                    System.out.println("updating " + urlFilePath);
+                    indexWriter.updateDocument(new Term("path", urlFilePath.toString()), luceneDoc);
+                }
             }
             // Mostrar información de fin de hilo si se especifica
             if (printThreadInfo) {
