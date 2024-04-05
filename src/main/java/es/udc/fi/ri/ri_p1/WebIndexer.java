@@ -16,7 +16,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.nio.file.FileSystems;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -25,6 +25,8 @@ import java.time.Duration;
 import java.util.Date;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.Properties;
+import java.util.concurrent.TimeUnit;
 
 public class WebIndexer {
 
@@ -34,8 +36,28 @@ public class WebIndexer {
     private static boolean bodyTermVectors;
     private static Analyzer analyzer;
     private static boolean printThreadInfo ;
+    private static String[] onlyDoms;
 
+    public static class WorkerThread implements Runnable {
+        private final Path folder;
+        private final IndexWriter writer;
+        public WorkerThread(final Path folder, IndexWriter writer) {
+            this.folder = folder;
+            this.writer = writer;
+        }
+        /**
+         * This is the work that the current thread will do when processed by the pool.
+         * In this case, it will only print some information.
+         */
+        @Override
+        public void run() {
+            System.out.println(String.format("I am the thread '%s' and I am responsible for folder '%s'",
+                    Thread.currentThread().getName(), folder));
 
+            processUrlFile(folder, writer);
+        }
+
+    }
     public static void main(String[] args) throws IOException, InterruptedException {
 
         String indexPath = "src/main/resources/index";    // Carpeta donde se almacenará el índice
@@ -87,6 +109,16 @@ public class WebIndexer {
             analyzer = new StandardAnalyzer();
         }
 
+        //Cargamos el fichero de propiedades
+        Properties properties = new Properties();
+        properties.load(new FileInputStream("src/main/resources/config.properties"));
+
+        //Obtenemos los valores de las propiedades
+        String propOnlyDoms = properties.getProperty("onlyDoms");
+        if (propOnlyDoms != null) {
+            onlyDoms = propOnlyDoms.split("\\s+");
+        }
+
         // Inicializar el directorio del índice
         Directory indexDirectory = FSDirectory.open(Path.of(indexPath));
 
@@ -107,14 +139,37 @@ public class WebIndexer {
         // Configurar ThreadPool con el número de hilos especificado
         ExecutorService executorService = Executors.newFixedThreadPool(numThreads);
 
-        // Procesar archivos .url en paralelo
-        Files.walk(Path.of(urlPath))
-                .filter(Files::isRegularFile)
-                .filter(path -> path.toString().endsWith(".url"))
-                .forEach(path -> executorService.submit(() -> processUrlFile(path, indexWriter)));
+        try (DirectoryStream<Path> directoryStream = Files.newDirectoryStream(Paths.get(urlPath))) {
+
+            /* We process each subfolder in a new thread. */
+            for (final Path path : directoryStream) {
+                if (Files.isRegularFile(path)) {
+                    final Runnable worker = new WorkerThread(path, indexWriter);
+                    /*
+                     * Send the thread to the ThreadPool. It will be processed eventually.
+                     */
+                    executorService.execute(worker);
+                }
+            }
+
+        } catch (final IOException e) {
+            e.printStackTrace();
+            System.exit(-1);
+        }
 
         // Apagar el ThreadPool después de terminar todas las tareas
         executorService.shutdown();
+
+        /* Wait up to 1 hour to finish all the previously submitted jobs */
+        try {
+            executorService.awaitTermination(1, TimeUnit.HOURS);
+        } catch (final InterruptedException e) {
+            e.printStackTrace();
+            System.exit(-2);
+        }
+
+        // Cerrar el IndexWriter
+        indexWriter.close();
 
         if (printAppInfo) {
             System.out.println("Creado índice " + indexPath + " en " + System.currentTimeMillis() + " msecs");
@@ -140,10 +195,22 @@ public class WebIndexer {
             BufferedReader reader = Files.newBufferedReader(path);
             String line;
             while ((line = reader.readLine()) != null) {
+                // Filtrar las URL según el archivo de propiedades
+                if (onlyDoms != null) {
+                    boolean found = false;
+                    for (String dom : onlyDoms) {
+                        if (line.contains(dom)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        continue;
+                    }
+                }
                 processUrl(line, indexWriter, path);
             }
             reader.close();
-            indexWriter.close();
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -151,124 +218,124 @@ public class WebIndexer {
 
     private static void processUrl(String url, IndexWriter indexWriter, Path urlFilePath) {
         try {
-            // Mostrar información de inicio de hilo si se especifica
-            if (printThreadInfo) {
-                System.out.println("Hilo " + Thread.currentThread().getName() + " comienzo url " + url);
-            }
-
-            HttpClient httpClient = HttpClient.newHttpClient();
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .timeout(Duration.ofSeconds(10)) // Establecer timeout de conexión
-                    .build();
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
-            // Verificar si la respuesta es un código de redirección 3xx
-            if (response.statusCode() >= 300 && response.statusCode() < 400) {
-                // Obtener la nueva URL de redirección
-                String redirectUrl = response.headers().firstValue("Location").orElse(null);
-                if (redirectUrl != null) {
-                    // Procesar la nueva URL de redirección
-                    processUrl(redirectUrl, indexWriter, urlFilePath);
-                    return; // Salir del método para evitar la indexación de la URL original
-                }
-            }
-
-            // Verificar si la respuesta es exitosa (código 200)
-            if (response.statusCode() == 200) {
-                String fileName = url.replaceAll("^https?://", "").replaceAll("/", "_").replaceAll("\\W+", "");
-                String locfilePath = docsPath + "/" + fileName + ".loc.";
-                String locnotagsfilePath = docsPath + "/" + fileName + ".loc.notags";
-
-
-                Path rutaLoc = Paths.get(locfilePath);
-                Files.write(rutaLoc, response.body().getBytes());
-
-                // Parsear la página web
-                org.jsoup.nodes.Document doc = Jsoup.parse(response.body());
-                String title = doc.title();
-                String body = doc.body().text();
-
-                // Crear el nombre de archivo local
-
-                // Escribir el contenido en el archivo .loc.notags
-                try (PrintWriter writer = new PrintWriter(locnotagsfilePath)) {
-                    writer.println(title);
-                    writer.println(body);
+                // Mostrar información de inicio de hilo si se especifica
+                if (printThreadInfo) {
+                    System.out.println("Hilo " + Thread.currentThread().getName() + " comienzo url " + url);
                 }
 
-                // Obtener información del archivo .loc
-                BasicFileAttributes attrs = Files.readAttributes(urlFilePath, BasicFileAttributes.class);
+                HttpClient httpClient = HttpClient.newHttpClient();
+                HttpRequest request = HttpRequest.newBuilder()
+                        .uri(URI.create(url))
+                        .timeout(Duration.ofSeconds(10)) // Establecer timeout de conexión
+                        .build();
+                HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
-                // Calcular el tamaño del archivo .loc
-                long locSize = Files.size(rutaLoc);
+                // Verificar si la respuesta es un código de redirección 3xx
+                if (response.statusCode() >= 300 && response.statusCode() < 400) {
+                    // Obtener la nueva URL de redirección
+                    String redirectUrl = response.headers().firstValue("Location").orElse(null);
+                    if (redirectUrl != null) {
+                        // Procesar la nueva URL de redirección
+                        processUrl(redirectUrl, indexWriter, urlFilePath);
+                        return; // Salir del método para evitar la indexación de la URL original
+                    }
+                } else if (response.statusCode() == 200) { // Si la respuesta es 200 OK
+                    String fileName = url.replaceAll("^https?://", "").replaceAll("/", "_").replaceAll("\\W+", "");
+                    String locfilePath = docsPath + "/" + fileName + ".loc.";
+                    String locnotagsfilePath = docsPath + "/" + fileName + ".loc.notags";
 
-                // Calcular el tamaño del archivo .loc.notags
-                long notagsSize = Files.size(Path.of(locnotagsfilePath));
 
-                // Obtener información de tiempo
-                Date creationTime = new Date(attrs.creationTime().toMillis());
-                Date lastAccessTime = new Date(attrs.lastAccessTime().toMillis());
-                Date lastModifiedTime = new Date(attrs.lastModifiedTime().toMillis());
+                    Path rutaLoc = Paths.get(locfilePath);
+                    Files.write(rutaLoc, response.body().getBytes());
 
-                // Convertir las fechas al formato de Lucene
-                String creationTimeLucene = DateTools.dateToString(creationTime, DateTools.Resolution.SECOND);
-                String lastAccessTimeLucene = DateTools.dateToString(lastAccessTime, DateTools.Resolution.SECOND);
-                String lastModifiedTimeLucene = DateTools.dateToString(lastModifiedTime, DateTools.Resolution.SECOND);
+                    // Parsear la página web
+                    org.jsoup.nodes.Document doc = Jsoup.parse(response.body());
+                    String title = doc.title();
+                    String body = doc.body().text();
 
-                //Opción -titleTermVector
-                FieldType titleFieldType = new FieldType(TextField.TYPE_STORED);
-                if (titleTermVectors) {
-                    titleFieldType.setStoreTermVectors(true);
-                    titleFieldType.setStoreTermVectorPositions(true);
-                    titleFieldType.setStoreTermVectorOffsets(true);
+                    // Crear el nombre de archivo local
+
+                    // Escribir el contenido en el archivo .loc.notags
+                    try (PrintWriter writer = new PrintWriter(locnotagsfilePath)) {
+                        writer.println(title);
+                        writer.println(body);
+                    }
+
+                    // Obtener información del archivo .loc
+                    BasicFileAttributes attrs = Files.readAttributes(urlFilePath, BasicFileAttributes.class);
+
+                    // Calcular el tamaño del archivo .loc
+                    long locSize = Files.size(rutaLoc);
+
+                    // Calcular el tamaño del archivo .loc.notags
+                    long notagsSize = Files.size(Path.of(locnotagsfilePath));
+
+                    // Obtener información de tiempo
+                    Date creationTime = new Date(attrs.creationTime().toMillis());
+                    Date lastAccessTime = new Date(attrs.lastAccessTime().toMillis());
+                    Date lastModifiedTime = new Date(attrs.lastModifiedTime().toMillis());
+
+                    // Convertir las fechas al formato de Lucene
+                    String creationTimeLucene = DateTools.dateToString(creationTime, DateTools.Resolution.SECOND);
+                    String lastAccessTimeLucene = DateTools.dateToString(lastAccessTime, DateTools.Resolution.SECOND);
+                    String lastModifiedTimeLucene = DateTools.dateToString(lastModifiedTime, DateTools.Resolution.SECOND);
+
+                    //Opción -titleTermVector
+                    FieldType titleFieldType = new FieldType(TextField.TYPE_STORED);
+                    if (titleTermVectors) {
+                        titleFieldType.setStoreTermVectors(true);
+                        titleFieldType.setStoreTermVectorPositions(true);
+                        titleFieldType.setStoreTermVectorOffsets(true);
+                    }
+
+                    //Opción -bodyTermVector
+                    FieldType bodyFieldType = new FieldType(TextField.TYPE_STORED);
+                    if (bodyTermVectors) {
+                        bodyFieldType.setStoreTermVectors(true);
+                        bodyFieldType.setStoreTermVectorPositions(true);
+                        bodyFieldType.setStoreTermVectorOffsets(true);
+                    }
+
+                    // Crear documento Lucene para el archivo .loc.notags
+                    Document luceneDoc = new Document();
+                    luceneDoc.add(new StringField("path", locnotagsfilePath, Field.Store.YES));
+                    luceneDoc.add(new Field("title", title, titleFieldType));
+                    luceneDoc.add(new Field("body", body, bodyFieldType));
+                    //luceneDoc.add(new StoredField("title", title)); // Campo adicional para ver en la pestaña de documentos de Luke
+                    //luceneDoc.add(new StoredField("body", body)); // Campo adicional para ver en la pestaña de documentos de Luke
+                    luceneDoc.add(new StringField("hostname", InetAddress.getLocalHost().getHostName(), Field.Store.YES));
+                    luceneDoc.add(new StringField("thread", Thread.currentThread().getName(), Field.Store.YES));
+                    luceneDoc.add(new LongPoint("locKb", locSize / 1024));
+                    luceneDoc.add(new StoredField("locKb", locSize / 1024)); // Campo adicional para ver en la pestaña de documentos de Luke
+                    luceneDoc.add(new LongPoint("notagsKb", notagsSize / 1024));
+                    luceneDoc.add(new StoredField("notagsKb", notagsSize / 1024)); // Campo adicional para ver en la pestaña de documentos de Luke
+                    luceneDoc.add(new StoredField("creationTime", creationTime.toString()));
+                    luceneDoc.add(new StoredField("lastAccessTime", lastAccessTime.toString()));
+                    luceneDoc.add(new StoredField("lastModifiedTime", lastModifiedTime.toString()));
+                    luceneDoc.add(new StoredField("creationTimeLucene", creationTimeLucene));
+                    luceneDoc.add(new StoredField("lastAccessTimeLucene", lastAccessTimeLucene));
+                    luceneDoc.add(new StoredField("lastModifiedTimeLucene", lastModifiedTimeLucene));
+
+                    if (indexWriter.getConfig().getOpenMode() == IndexWriterConfig.OpenMode.CREATE) {
+                        // New index, so we just add the document (no old document can be there):
+                        System.out.println("adding " + urlFilePath);
+                        indexWriter.addDocument(luceneDoc);
+                    } else {
+                        // Existing index (an old copy of this document may have been indexed) so
+                        // we use updateDocument instead to replace the old one matching the exact
+                        // path, if present:
+                        System.out.println("updating " + urlFilePath);
+                        indexWriter.updateDocument(new Term("path", urlFilePath.toString()), luceneDoc);
+                    }
+                } else { //Si no se puede acceder a la URL
+                    System.out.println("Error al procesar la URL: " + url + " - Código de estado: " + response.statusCode());
                 }
 
-                //Opción -bodyTermVector
-                FieldType bodyFieldType = new FieldType(TextField.TYPE_STORED);
-                if (bodyTermVectors) {
-                    bodyFieldType.setStoreTermVectors(true);
-                    bodyFieldType.setStoreTermVectorPositions(true);
-                    bodyFieldType.setStoreTermVectorOffsets(true);
+                // Mostrar información de fin de hilo si se especifica
+                if (printThreadInfo) {
+                    System.out.println("Hilo " + Thread.currentThread().getName() + " fin url " + url);
                 }
-
-                // Crear documento Lucene para el archivo .loc.notags
-                Document luceneDoc = new Document();
-                luceneDoc.add(new StringField("path", locnotagsfilePath, Field.Store.YES));
-                luceneDoc.add(new Field("title", title, titleFieldType));
-                luceneDoc.add(new Field("body", body, bodyFieldType));
-                //luceneDoc.add(new StoredField("title", title)); // Campo adicional para ver en la pestaña de documentos de Luke
-                //luceneDoc.add(new StoredField("body", body)); // Campo adicional para ver en la pestaña de documentos de Luke
-                luceneDoc.add(new StringField("hostname", InetAddress.getLocalHost().getHostName(), Field.Store.YES));
-                luceneDoc.add(new StringField("thread", Thread.currentThread().getName(), Field.Store.YES));
-                luceneDoc.add(new LongPoint("locKb", locSize / 1024));
-                luceneDoc.add(new StoredField("locKb", locSize / 1024)); // Campo adicional para ver en la pestaña de documentos de Luke
-                luceneDoc.add(new LongPoint("notagsKb", notagsSize / 1024));
-                luceneDoc.add(new StoredField("notagsKb", notagsSize / 1024)); // Campo adicional para ver en la pestaña de documentos de Luke
-                luceneDoc.add(new StoredField("creationTime", creationTime.toString()));
-                luceneDoc.add(new StoredField("lastAccessTime", lastAccessTime.toString()));
-                luceneDoc.add(new StoredField("lastModifiedTime", lastModifiedTime.toString()));
-                luceneDoc.add(new StoredField("creationTimeLucene", creationTimeLucene));
-                luceneDoc.add(new StoredField("lastAccessTimeLucene", lastAccessTimeLucene));
-                luceneDoc.add(new StoredField("lastModifiedTimeLucene", lastModifiedTimeLucene));
-
-                if (indexWriter.getConfig().getOpenMode() == IndexWriterConfig.OpenMode.CREATE) {
-                    // New index, so we just add the document (no old document can be there):
-                    System.out.println("adding " + urlFilePath);
-                    indexWriter.addDocument(luceneDoc);
-                } else {
-                    // Existing index (an old copy of this document may have been indexed) so
-                    // we use updateDocument instead to replace the old one matching the exact
-                    // path, if present:
-                    System.out.println("updating " + urlFilePath);
-                    indexWriter.updateDocument(new Term("path", urlFilePath.toString()), luceneDoc);
-                }
-            }
-            // Mostrar información de fin de hilo si se especifica
-            if (printThreadInfo) {
-                System.out.println("Hilo " + Thread.currentThread().getName() + " fin url " + url);
-            }
-        } catch (IOException | InterruptedException e) {
+        } catch (IOException | InterruptedException e) { // Manejar excepciones de E/S y de red
             e.printStackTrace();
         }
     }

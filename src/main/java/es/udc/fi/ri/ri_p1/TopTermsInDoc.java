@@ -74,7 +74,7 @@ public class TopTermsInDoc {
 
             while(posting.nextDoc() != PostingsEnum.NO_MORE_DOCS){
                 if (posting.docID()==docID){
-                    long termFreq = iterator.totalTermFreq();
+                    long termFreq = posting.freq();
                     long docFreq = reader.docFreq(new Term(field, termText));
                     double idf = Math.log10((double) reader.numDocs() / (docFreq + 1)); // +1 para evitar la división por cero
                     double tfIdf = termFreq * idf;
